@@ -135,7 +135,7 @@ def init():
             members[did] = {
                 "handle": m["handle"],
                 "display_name": m.get("display_name", ""),
-                "bio": "",
+                "bio": None,
                 "categories": [],
                 "entity_type": "",
                 "institution": "",
@@ -723,7 +723,7 @@ def refresh_profiles(refresh_all: bool):
     else:
         to_refresh = {
             did: info for did, info in active.items()
-            if not info.get("bio")
+            if info.get("bio") is None
         }
 
     if not to_refresh:

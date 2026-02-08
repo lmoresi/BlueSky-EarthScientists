@@ -2,6 +2,27 @@
 
 A curated Bluesky list of earth science researchers, institutions, and organisations. This tool manages the list membership, discovers candidates, and classifies members.
 
+## Repository Layout
+
+```
+BlueSky-EarthScientists/             ← repo root (Claude runs from here)
+├── CLAUDE.md                        ← this file
+├── .claude/commands/                ← slash commands for AI tasks
+├── bsky-list-manager/               ← Python project (pixi environment)
+│   ├── pyproject.toml               ← pixi config & Python package config
+│   ├── src/bsky_geo/                ← CLI source code
+│   ├── data/                        ← members.json, candidates.json (git-ignored)
+│   ├── .env                         ← credentials (git-ignored)
+│   └── tests/
+└── README.md
+```
+
+**Important:** The pixi environment and `pyproject.toml` live inside `bsky-list-manager/`, not at the repo root. All CLI commands must be run from that directory:
+
+```bash
+cd bsky-list-manager && pixi run bsky-geo <command>
+```
+
 ## Interactive Workflow
 
 The preferred workflow uses **slash commands** for AI tasks (classification, review, evaluation) and the **CLI** for Bluesky API operations (fetching profiles, adding/removing members, syncing follows).
@@ -14,6 +35,9 @@ The preferred workflow uses **slash commands** for AI tasks (classification, rev
 - `/evaluate <handle>` — evaluate an account for relevance
 
 ### CLI Commands (Bluesky API operations)
+
+Run from `bsky-list-manager/` via `cd bsky-list-manager && pixi run bsky-geo <command>`:
+
 ```
 bsky-geo refresh-profiles [--all]   Batch-fetch fresh bios from Bluesky (fast, no AI)
 bsky-geo sync-follows               Sync follows to list (bidirectional)
@@ -25,8 +49,6 @@ bsky-geo check-dms                  Check DMs for addition requests
 bsky-geo init                       First-time setup
 bsky-geo doctor                     Diagnostic check
 ```
-
-Run via: `pixi run bsky-geo <command>` or `pixi shell` then `bsky-geo <command>`
 
 ### Typical Session
 1. `bsky-geo refresh-profiles` — update bios from Bluesky
@@ -58,6 +80,8 @@ All in `bsky-list-manager/data/` (git-ignored, personal to operator):
     "notes": ""
   }
   ```
+
+  The `bio` field uses `null` to mean "not yet fetched from Bluesky" and `""` for "fetched but genuinely empty". Run `bsky-geo refresh-profiles` to fetch unfetched bios.
 
 - **`candidates.json`** — pending candidates keyed by DID. Has `status` field: pending/approved/rejected.
 
@@ -106,7 +130,7 @@ When slash commands read/write `members.json` or `candidates.json`:
 
 ## Package Manager
 - Uses **pixi** for environment management
-- `pixi install` to set up; `pixi run pytest` to test
+- Run from `bsky-list-manager/`: `pixi install` to set up; `pixi run pytest` to test
 
 ## Environment Variables
-Set in `.env` (git-ignored) or shell: `BSKY_HANDLE`, `BSKY_APP_PASSWORD`, `ANTHROPIC_API_KEY`
+Set in `bsky-list-manager/.env` (git-ignored): `BSKY_HANDLE`, `BSKY_APP_PASSWORD`, `ANTHROPIC_API_KEY`
