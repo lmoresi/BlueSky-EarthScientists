@@ -1,0 +1,23 @@
+# Pixi environment
+.pixi/
+pixi.lock
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Secrets
+.env
+
+# Runtime data (contains personal account data)
+data/members.json
+data/candidates.json
+data/config.json
+data/crawl_cache/
+data/backups/
+
+# Keep the data directory structure
+!data/.gitkeep

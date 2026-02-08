@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bsky-geo"
+version = "0.1.0"
+description = "Bluesky Earth Scientists list manager — sync follows, AI-assisted discovery, interactive review"
+requires-python = ">= 3.11"
+dependencies = [
+    "atproto>=0.0.65",
+    "anthropic",
+    "click",
+    "rich",
+    "python-dotenv",
+]
+
+[project.scripts]
+bsky-geo = "bsky_geo.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bsky_geo"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["osx-arm64", "osx-64", "linux-64"]
+
+[tool.pixi.dependencies]
+python = ">=3.11"
+
+[tool.pixi.pypi-dependencies]
+bsky-geo = { path = ".", editable = true }
+
+[tool.pixi.tasks]
+geo = "bsky-geo"
