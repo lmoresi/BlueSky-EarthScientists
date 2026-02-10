@@ -9,9 +9,10 @@ Review pending candidates for the Bluesky Earth Scientists list.
 4. For each pending candidate, display:
    - Handle, display name, bio
    - Categories, entity type, confidence
-   - Source (how they were discovered: dm_request, crawl, etc.)
-   - AI reasoning (if present)
-   - Relevance assessment
+   - Source (how they were discovered: dm_request, network_crawl, manual_fetch, etc.)
+   - If `recent_posts` field exists, review the posts for earth science relevance
+   - If `dm_summary` field exists, show the DM context
+   - Relevance assessment based on bio and available post history
 
 5. For each candidate, recommend one of:
    - **approve** — add to the list (relevant earth scientist/institution)
@@ -33,14 +34,15 @@ Review pending candidates for the Bluesky Earth Scientists list.
   "handle": "someone.bsky.social",
   "display_name": "Dr Someone",
   "bio": "Geophysicist at ...",
-  "categories": ["geophysics", "seismology"],
-  "entity_type": "individual",
-  "institution": "University of ...",
-  "confidence": 0.85,
-  "is_relevant": true,
-  "reasoning": "Active seismologist...",
-  "source": "crawl",
+  "categories": [],
+  "entity_type": "",
+  "institution": "",
+  "confidence": 0.0,
+  "source": "network_crawl",
   "status": "pending",
+  "recent_posts": ["Just published a paper on...", "Great talk at AGU..."],
+  "dm_summary": "(only for dm_request source)",
+  "member_follow_count": 5,
   "discovered_date": "2025-01-15"
 }
 ```

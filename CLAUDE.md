@@ -44,6 +44,7 @@ bsky-geo sync-follows               Sync follows to list (bidirectional)
 bsky-geo add <handle>               Add someone to the list
 bsky-geo remove <handle>            Remove someone from the list
 bsky-geo list [--stats]             Show members (or summary stats)
+bsky-geo fetch-profile <handle>     Fetch profile + posts, save as pending candidate
 bsky-geo crawl                      Discover candidates from member networks
 bsky-geo check-dms                  Check DMs for addition requests
 bsky-geo init                       First-time setup
@@ -83,7 +84,7 @@ All in `bsky-list-manager/data/` (git-ignored, personal to operator):
 
   The `bio` field uses `null` to mean "not yet fetched from Bluesky" and `""` for "fetched but genuinely empty". Run `bsky-geo refresh-profiles` to fetch unfetched bios.
 
-- **`candidates.json`** — pending candidates keyed by DID. Has `status` field: pending/approved/rejected.
+- **`candidates.json`** — pending candidates keyed by DID. Has `status` field: pending/approved/rejected. Candidates may include a `recent_posts` field (list of up to 20 post texts) for slash commands to use during evaluation.
 
 - **`config.json`** — list URI, account DID, category/entity_type definitions.
 
@@ -133,4 +134,4 @@ When slash commands read/write `members.json` or `candidates.json`:
 - Run from `bsky-list-manager/`: `pixi install` to set up; `pixi run pytest` to test
 
 ## Environment Variables
-Set in `bsky-list-manager/.env` (git-ignored): `BSKY_HANDLE`, `BSKY_APP_PASSWORD`, `ANTHROPIC_API_KEY`
+Set in `bsky-list-manager/.env` (git-ignored): `BSKY_HANDLE`, `BSKY_APP_PASSWORD`

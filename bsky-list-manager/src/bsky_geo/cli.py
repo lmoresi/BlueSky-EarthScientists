@@ -14,7 +14,6 @@ from rich.table import Table
 
 from . import data_store
 from .bsky_client import BskyClient
-from .evaluator import classify_batch, evaluate_account
 
 console = Console()
 
@@ -495,205 +494,55 @@ def _show_stats(members: dict) -> None:
         console.print(table)
 
 
-# ── evaluate ────────────────────────────────────────────────────────────────
+# ── fetch-profile ──────────────────────────────────────────────────────────
 
-@cli.command()
+@cli.command("fetch-profile")
 @click.argument("handle_or_did")
-def evaluate(handle_or_did: str):
-    """AI-evaluate a Bluesky account for earth science relevance."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        console.print("[red]ANTHROPIC_API_KEY must be set.[/red]")
-        sys.exit(1)
-
+def fetch_profile(handle_or_did: str):
+    """Fetch a profile and recent posts from Bluesky, save as a pending candidate."""
     client = _get_client()
 
     console.print(f"Fetching profile for {handle_or_did}...")
     profile = client.get_profile(handle_or_did)
+    did = profile["did"]
     handle = profile["handle"]
 
+    # Check if already known
+    members = data_store.load_members()
+    if did in members and not members[did].get("removed"):
+        console.print(f"[yellow]{handle} is already a member.[/yellow]")
+        return
+
     console.print(f"Fetching recent posts from @{handle}...")
-    posts = client.get_author_posts(handle_or_did, limit=50)
+    posts = client.get_author_posts(did, limit=20)
     console.print(f"  {len(posts)} posts retrieved")
 
-    console.print(f"\nEvaluating with AI...")
-    result = evaluate_account(profile, posts, api_key=api_key)
-
-    # Display results
-    relevant = result.get("is_relevant", False)
-    confidence = result.get("confidence", 0)
-
-    if relevant:
-        console.print(f"\n[green bold]RELEVANT[/green bold] (confidence: {confidence:.0%})")
-    else:
-        console.print(f"\n[red bold]NOT RELEVANT[/red bold] (confidence: {confidence:.0%})")
-
-    console.print(f"  Entity type:  {result.get('entity_type', '')}")
-    console.print(f"  Categories:   {', '.join(result.get('categories', []))}")
-    console.print(f"  Institution:  {result.get('institution_affiliation', '')}")
-    console.print(f"  Activity:     {result.get('activity_assessment', '')}")
-    console.print(f"  Reasoning:    {result.get('reasoning', '')}")
-
-
-# ── classify ─────────────────────────────────────────────────────────────────
-
-@cli.command()
-@click.option("--all", "classify_all", is_flag=True, help="Reclassify all members (not just empty).")
-@click.option("--dry-run", is_flag=True, help="Show what would be classified without saving.")
-@click.option("--batch-size", default=20, help="Profiles per API call (max 20).")
-@click.option("--local", is_flag=True, help="Use local profile data only (skip Bluesky fetch).")
-def classify(classify_all: bool, dry_run: bool, batch_size: int, local: bool):
-    """Classify members by entity type and detect bots.
-
-    Fetches fresh profiles from Bluesky in batches (fast), then classifies
-    with Claude. Use --local to skip the fetch and use stored data only.
-    """
-    from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        console.print("[red]ANTHROPIC_API_KEY must be set.[/red]")
-        sys.exit(1)
-
-    members = data_store.load_members()
-
-    # Filter to active members needing classification
-    active = {
-        did: info for did, info in members.items()
-        if not info.get("removed")
+    # Save to candidates
+    candidates = data_store.load_candidates()
+    candidates[did] = {
+        "handle": handle,
+        "display_name": profile.get("display_name", ""),
+        "bio": profile.get("description", ""),
+        "categories": [],
+        "entity_type": "",
+        "institution": "",
+        "confidence": 0.0,
+        "source": "manual_fetch",
+        "status": "pending",
+        "recent_posts": posts[:20],
+        "discovered_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
     }
+    data_store.save_candidates(candidates)
 
-    if classify_all:
-        to_classify = active
-    else:
-        to_classify = {
-            did: info for did, info in active.items()
-            if not info.get("entity_type")
-        }
-
-    if not to_classify:
-        console.print("[green]All members already classified.[/green]")
-        return
-
-    console.print(
-        f"[bold]Classifying {len(to_classify)} members "
-        f"({'all' if classify_all else 'unclassified only'})...[/bold]"
-    )
-
-    if dry_run:
-        console.print(f"[yellow]Dry run — no changes will be saved.[/yellow]")
-        for i, (did, info) in enumerate(list(to_classify.items())[:10]):
-            console.print(f"  {info.get('handle', did)}")
-        if len(to_classify) > 10:
-            console.print(f"  ... and {len(to_classify) - 10} more")
-        return
-
-    client = None if local else _get_client()
-
-    # Backup before mutations
-    data_store.backup("members.json")
-
-    batch_size = min(batch_size, 20)
-    items = list(to_classify.items())
-    batches = [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
-
-    console.print(f"  {len(batches)} batches of up to {batch_size}")
-    if local:
-        console.print("  Using local profile data (bios may be empty)")
-    else:
-        console.print("  Fetching fresh profiles from Bluesky (batch API)")
-    console.print()
-
-    from collections import Counter
-    type_counts: Counter = Counter()
-    bot_count = 0
-    errors = 0
-
-    with Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Classifying", total=len(items))
-
-        for batch in batches:
-            batch_dids = [did for did, _info in batch]
-
-            # Fetch profiles: batch API (up to 25 per call) or local
-            if client:
-                try:
-                    fetched = client.get_profiles(batch_dids)
-                    # Index by DID for reliable matching
-                    profile_map = {p["did"]: p for p in fetched}
-                except Exception as exc:
-                    console.print(f"  [yellow]Batch fetch failed: {exc}[/yellow]")
-                    profile_map = {}
-
-                profiles = []
-                resolved_dids = []
-                for did, info in batch:
-                    if did in profile_map:
-                        p = profile_map[did]
-                        profiles.append(p)
-                        resolved_dids.append(did)
-                        # Save bio back to members.json for future --local runs
-                        members[did]["bio"] = p.get("description", "")
-                        members[did]["display_name"] = p.get("display_name", "")
-                        members[did]["handle"] = p.get("handle", info.get("handle", ""))
-                    else:
-                        # Profile not returned (deleted/suspended account)
-                        errors += 1
-                        progress.advance(task)
-                batch_dids = resolved_dids
-            else:
-                profiles = [
-                    {
-                        "handle": info.get("handle", ""),
-                        "display_name": info.get("display_name", ""),
-                        "description": info.get("bio", ""),
-                    }
-                    for _did, info in batch
-                ]
-
-            if not profiles:
-                continue
-
-            # Classify the batch
-            try:
-                results = classify_batch(profiles, api_key=api_key)
-            except Exception as exc:
-                console.print(f"  [red]Classification API error: {exc}[/red]")
-                errors += len(profiles)
-                progress.advance(task, len(profiles))
-                continue
-
-            # Update members with results
-            for did, result in zip(batch_dids, results):
-                entity_type = result.get("entity_type", "unknown")
-                is_bot = result.get("is_bot", False)
-                confidence = result.get("confidence", 0.0)
-
-                members[did]["entity_type"] = entity_type
-                members[did]["is_bot"] = is_bot
-                members[did]["classify_confidence"] = confidence
-
-                type_counts[entity_type] += 1
-                if is_bot:
-                    bot_count += 1
-
-                progress.advance(task)
-
-    # Save updated members
-    data_store.save_members(members)
-
-    # Summary
-    console.print(f"\n[bold]Classification complete:[/bold]")
-    for entity_type, count in type_counts.most_common():
-        console.print(f"  {entity_type:<15} {count:>5}")
-    console.print(f"  {'bots flagged':<15} {bot_count:>5}")
-    if errors:
-        console.print(f"  [red]errors: {errors}[/red]")
+    # Display profile summary
+    console.print(f"\n[bold]{profile.get('display_name', '')}[/bold] (@{handle})")
+    bio = profile.get("description", "")
+    if bio:
+        console.print(f"  Bio: {bio[:200]}")
+    console.print(f"  Followers: {profile.get('followers_count', 0)}")
+    console.print(f"  Posts: {profile.get('posts_count', 0)}")
+    console.print(f"\n[green]Saved to candidates as pending.[/green]")
+    console.print(f"[dim]Run /evaluate {handle} for an AI assessment.[/dim]")
 
 
 # ── refresh-profiles ────────────────────────────────────────────────────────
@@ -787,11 +636,6 @@ def refresh_profiles(refresh_all: bool):
 @cli.command("check-dms")
 def check_dms():
     """Check DMs for list addition requests."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        console.print("[red]ANTHROPIC_API_KEY must be set.[/red]")
-        sys.exit(1)
-
     client = _get_client()
 
     console.print("[bold]Checking DMs for list addition requests...[/bold]\n")
@@ -808,9 +652,9 @@ def check_dms():
 
     console.print(f"Found {len(convos)} conversations. Scanning for requests...\n")
 
-    import anthropic as anthropic_mod
+    # Keywords that suggest a list addition request
+    REQUEST_KEYWORDS = ["add me", "join", "list", "earth scien", "geolog", "member"]
 
-    anthropic_client = anthropic_mod.Anthropic(api_key=api_key)
     candidates = data_store.load_candidates()
     members = data_store.load_members()
     new_requests = []
@@ -825,83 +669,66 @@ def check_dms():
         if not messages:
             continue
 
-        # Build conversation text for Claude to analyze
+        # Build conversation text and check for keywords
         convo_text = ""
         for msg in messages:
             sender = msg.get("sender_did", "unknown")
-            # Mark which messages are from the other person vs us
             role = "them" if sender != client.did else "me"
             convo_text += f"[{role}]: {msg.get('text', '')}\n"
 
-        # Ask Claude if this is a list addition request
-        response = anthropic_client.messages.create(
-            model="claude-sonnet-4-5-20250929",
-            max_tokens=256,
-            messages=[{
-                "role": "user",
-                "content": (
-                    "Is this DM conversation a request to be added to a Bluesky list "
-                    "of earth scientists/geologists? Respond with JSON only:\n"
-                    '{"is_request": true/false, "requester_handle": "handle if mentioned", '
-                    '"summary": "brief description"}\n\n'
-                    f"Conversation:\n{convo_text}"
-                ),
-            }],
-        )
+        # Simple keyword heuristic for request detection
+        convo_lower = convo_text.lower()
+        is_request = any(kw in convo_lower for kw in REQUEST_KEYWORDS)
 
-        try:
-            import json
-            result = json.loads(response.content[0].text.strip())
-        except (json.JSONDecodeError, IndexError):
+        if not is_request:
             continue
 
-        if result.get("is_request"):
-            # Identify the requester
-            other_members = [
-                m for m in convo["members"] if m["did"] != client.did
-            ]
-            if not other_members:
-                continue
+        # Identify the requester
+        other_members = [
+            m for m in convo["members"] if m["did"] != client.did
+        ]
+        if not other_members:
+            continue
 
-            requester = other_members[0]
-            did = requester["did"]
+        requester = other_members[0]
+        did = requester["did"]
 
-            if did in members or did in candidates:
-                console.print(
-                    f"  [dim]Skipping {requester['handle']} — already known[/dim]"
-                )
-                continue
+        if did in members or did in candidates:
+            console.print(
+                f"  [dim]Skipping {requester['handle']} — already known[/dim]"
+            )
+            continue
 
-            # Evaluate the requester
-            console.print(f"  Evaluating {requester['handle']}...")
-            try:
-                profile = client.get_profile(did)
-                posts = client.get_author_posts(did, limit=50)
-                evaluation = evaluate_account(profile, posts, api_key=api_key)
+        # Fetch profile and recent posts
+        console.print(f"  Fetching {requester['handle']}...")
+        try:
+            profile = client.get_profile(did)
+            posts = client.get_author_posts(did, limit=20)
 
-                candidates[did] = {
-                    "handle": requester["handle"],
-                    "display_name": requester.get("display_name", ""),
-                    "bio": profile.get("description", ""),
-                    "categories": evaluation.get("categories", []),
-                    "entity_type": evaluation.get("entity_type", ""),
-                    "institution": evaluation.get("institution_affiliation", ""),
-                    "confidence": evaluation.get("confidence", 0.0),
-                    "is_relevant": evaluation.get("is_relevant", False),
-                    "reasoning": evaluation.get("reasoning", ""),
-                    "activity_assessment": evaluation.get("activity_assessment", ""),
-                    "source": "dm_request",
-                    "status": "pending",
-                    "dm_summary": result.get("summary", ""),
-                    "discovered_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
-                }
-                new_requests.append(requester["handle"])
+            # Truncate DM summary for storage
+            dm_summary = convo_text[:500]
 
-                rel = "[green]relevant[/green]" if evaluation.get("is_relevant") else "[red]not relevant[/red]"
-                console.print(f"    → {rel} ({evaluation.get('confidence', 0):.0%})")
+            candidates[did] = {
+                "handle": requester["handle"],
+                "display_name": requester.get("display_name", ""),
+                "bio": profile.get("description", ""),
+                "categories": [],
+                "entity_type": "",
+                "institution": "",
+                "confidence": 0.0,
+                "source": "dm_request",
+                "status": "pending",
+                "dm_summary": dm_summary,
+                "recent_posts": posts[:20],
+                "discovered_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+            }
+            new_requests.append(requester["handle"])
 
-            except Exception as exc:
-                console.print(f"    [yellow]Error: {exc}[/yellow]")
+            bio = profile.get("description", "") or ""
+            console.print(f"    {bio[:80]}")
+
+        except Exception as exc:
+            console.print(f"    [yellow]Error: {exc}[/yellow]")
 
     if new_requests:
         data_store.save_candidates(candidates)
@@ -910,6 +737,9 @@ def check_dms():
         )
         for h in new_requests:
             console.print(f"  • {h}")
+        console.print(
+            "\n[dim]Run /review-candidates to evaluate and approve/reject them.[/dim]"
+        )
     else:
         console.print("[yellow]No new addition requests found in DMs.[/yellow]")
 
@@ -918,19 +748,14 @@ def check_dms():
 
 @cli.command()
 @click.option("--threshold", "-t", default=3, help="Minimum members following an account.")
-@click.option("--max-evaluate", "-n", default=50, help="Max candidates to evaluate.")
+@click.option("--max-fetch", "-n", default=50, help="Max candidates to fetch profiles for.")
 @click.option(
     "--strategy", default="all",
     type=click.Choice(["all", "institutions", "weighted"]),
     help="Crawl strategy: all (default), institutions (only), or weighted (institutions count 2x).",
 )
-def crawl(threshold: int, max_evaluate: int, strategy: str):
+def crawl(threshold: int, max_fetch: int, strategy: str):
     """Discover candidate earth scientists from member networks."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        console.print("[red]ANTHROPIC_API_KEY must be set.[/red]")
-        sys.exit(1)
-
     client = _get_client()
     members = data_store.load_members()
     candidates = data_store.load_candidates()
@@ -954,8 +779,7 @@ def crawl(threshold: int, max_evaluate: int, strategy: str):
         active_members,
         candidates,
         frequency_threshold=threshold,
-        max_evaluate=max_evaluate,
-        api_key=api_key,
+        max_fetch=max_fetch,
         strategy=strategy,
     )
 
@@ -988,36 +812,32 @@ def help_cmd():
     console.print("  if you want the check-dms command to work.")
     console.print("  Copy the generated password (format: xxxx-xxxx-xxxx-xxxx).\n")
 
-    console.print("[bold underline]2. Get an Anthropic API Key (for AI features)[/bold underline]\n")
-    console.print("  Go to console.anthropic.com > API Keys > Create Key")
-    console.print("  This is needed for: evaluate, crawl, check-dms, review")
-    console.print("  Not needed for: init, sync-follows, add, remove, list\n")
-
-    console.print("[bold underline]3. Store your credentials[/bold underline]\n")
+    console.print("[bold underline]2. Store your credentials[/bold underline]\n")
     console.print("  [bold]Option A[/bold] — .env file (recommended):")
     console.print("  Create a file called [cyan].env[/cyan] in the bsky-list-manager/ directory:\n")
     console.print("    BSKY_HANDLE=yourhandle.bsky.social")
-    console.print("    BSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx")
-    console.print("    ANTHROPIC_API_KEY=sk-ant-...\n")
-    console.print("  Or run [cyan]bsky-geo set-credentials --bsky --anthropic[/cyan] to be prompted.\n")
+    console.print("    BSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx\n")
+    console.print("  Or run [cyan]bsky-geo set-credentials[/cyan] to be prompted.\n")
     console.print("  [bold]Option B[/bold] — environment variables:")
     console.print("  export BSKY_HANDLE=yourhandle.bsky.social")
-    console.print("  export BSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx")
-    console.print("  export ANTHROPIC_API_KEY=sk-ant-...\n")
+    console.print("  export BSKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx\n")
     console.print("  The .env file is git-ignored so your secrets stay local.\n")
 
-    console.print("[bold underline]4. Initialise[/bold underline]\n")
+    console.print("[bold underline]3. Initialise[/bold underline]\n")
     console.print("  [cyan]bsky-geo init[/cyan]")
     console.print("  This logs in, lets you pick which Bluesky list to manage,")
     console.print("  and bootstraps data/members.json from the current list members.\n")
 
-    console.print("[bold underline]5. Typical workflow[/bold underline]\n")
-    console.print("  [cyan]bsky-geo sync-follows[/cyan]    Sync your follows to the list")
-    console.print("  [cyan]bsky-geo add <handle>[/cyan]    Manually add someone")
-    console.print("  [cyan]bsky-geo list --stats[/cyan]    See who's on the list")
-    console.print("  [cyan]bsky-geo crawl[/cyan]           Discover candidates from member networks")
-    console.print("  [cyan]bsky-geo review[/cyan]          Approve/reject discovered candidates")
-    console.print("  [cyan]bsky-geo check-dms[/cyan]       Find DM requests to join the list\n")
+    console.print("[bold underline]4. Typical workflow[/bold underline]\n")
+    console.print("  [cyan]bsky-geo sync-follows[/cyan]        Sync your follows to the list")
+    console.print("  [cyan]bsky-geo refresh-profiles[/cyan]    Update bios from Bluesky")
+    console.print("  [cyan]bsky-geo add <handle>[/cyan]        Manually add someone")
+    console.print("  [cyan]bsky-geo list --stats[/cyan]        See who's on the list")
+    console.print("  [cyan]bsky-geo fetch-profile <h>[/cyan]   Fetch a profile for AI review")
+    console.print("  [cyan]bsky-geo crawl[/cyan]               Discover candidates from networks")
+    console.print("  [cyan]bsky-geo check-dms[/cyan]           Find DM requests to join\n")
+    console.print("  AI tasks (classify, evaluate, review) use slash commands")
+    console.print("  in Claude Code — no API key needed.\n")
 
     console.print("[bold underline]Troubleshooting[/bold underline]\n")
     console.print("  [cyan]bsky-geo doctor[/cyan]          Check credentials and data file health")
@@ -1042,13 +862,6 @@ def doctor():
             console.print(f"Credentials:   [red]FAIL[/red] ({exc})")
     else:
         console.print("Credentials:   [red]NOT SET[/red] (set BSKY_HANDLE and BSKY_APP_PASSWORD)")
-
-    # Check Anthropic API key
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if api_key:
-        console.print("Anthropic API:  [green]OK[/green] (key set)")
-    else:
-        console.print("Anthropic API:  [yellow]NOT SET[/yellow] (set ANTHROPIC_API_KEY for AI features)")
 
     # Check data files
     config = data_store.load_config()
@@ -1080,10 +893,8 @@ def doctor():
         ("bsky-geo add <handle>", "Add someone to the list"),
         ("bsky-geo remove <handle>", "Remove someone from the list"),
         ("bsky-geo list", "Show current members (--stats for summary)"),
-        ("bsky-geo evaluate <handle>", "AI-evaluate an account"),
-        ("bsky-geo classify", "Classify members by entity type"),
+        ("bsky-geo fetch-profile <h>", "Fetch profile + posts for AI review"),
         ("bsky-geo crawl", "Discover candidates from member networks"),
-        ("bsky-geo review", "Interactive review of pending candidates"),
         ("bsky-geo check-dms", "Check DMs for addition requests"),
         ("bsky-geo set-credentials", "Update stored credentials"),
         ("bsky-geo doctor", "This diagnostic screen"),
@@ -1095,14 +906,8 @@ def doctor():
 # ── set-credentials ─────────────────────────────────────────────────────────
 
 @cli.command("set-credentials")
-@click.option("--bsky", "update_bsky", is_flag=True, help="Update Bluesky credentials.")
-@click.option("--anthropic", "update_anthropic", is_flag=True, help="Update Anthropic API key.")
-def set_credentials(update_bsky: bool, update_anthropic: bool):
-    """Update stored credentials in .env file."""
-    if not update_bsky and not update_anthropic:
-        console.print("Specify [bold]--bsky[/bold] and/or [bold]--anthropic[/bold].")
-        return
-
+def set_credentials():
+    """Update stored Bluesky credentials in .env file."""
     env_path = Path(__file__).resolve().parent.parent.parent / ".env"
 
     # Load existing .env content
@@ -1114,25 +919,19 @@ def set_credentials(update_bsky: bool, update_anthropic: bool):
                 key, _, value = line.partition("=")
                 env_vars[key.strip()] = value.strip()
 
-    if update_bsky:
-        handle = click.prompt("Bluesky handle", default=env_vars.get("BSKY_HANDLE", ""))
-        password = click.prompt("App password", hide_input=True)
+    handle = click.prompt("Bluesky handle", default=env_vars.get("BSKY_HANDLE", ""))
+    password = click.prompt("App password", hide_input=True)
 
-        # Test login
-        console.print("Testing login...")
-        try:
-            client = BskyClient(handle, password)
-            console.print(f"[green]Login successful as {client.profile.handle}[/green]")
-            env_vars["BSKY_HANDLE"] = handle
-            env_vars["BSKY_APP_PASSWORD"] = password
-        except Exception as exc:
-            console.print(f"[red]Login failed: {exc}[/red]")
-            return
-
-    if update_anthropic:
-        api_key = click.prompt("Anthropic API key", hide_input=True)
-        env_vars["ANTHROPIC_API_KEY"] = api_key
-        console.print("[green]API key saved.[/green]")
+    # Test login
+    console.print("Testing login...")
+    try:
+        client = BskyClient(handle, password)
+        console.print(f"[green]Login successful as {client.profile.handle}[/green]")
+        env_vars["BSKY_HANDLE"] = handle
+        env_vars["BSKY_APP_PASSWORD"] = password
+    except Exception as exc:
+        console.print(f"[red]Login failed: {exc}[/red]")
+        return
 
     # Write .env
     lines = [f"{k}={v}" for k, v in env_vars.items()]

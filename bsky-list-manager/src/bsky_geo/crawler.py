@@ -11,15 +11,14 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from . import data_store
 from .bsky_client import BskyClient
-from .evaluator import evaluate_account
 
 console = Console()
 
-# Only evaluate accounts followed by this many existing members
+# Only save accounts followed by this many existing members
 FREQUENCY_THRESHOLD = 3
 
-# Max candidates to evaluate per crawl run
-MAX_EVALUATE = 50
+# Max candidates to fetch per crawl run
+MAX_FETCH = 50
 
 # Entity types considered "institutional" for crawl strategies
 INSTITUTIONAL_TYPES = {"institution", "department", "society", "journal", "service"}
@@ -31,19 +30,20 @@ def crawl_network(
     candidates: dict,
     *,
     frequency_threshold: int = FREQUENCY_THRESHOLD,
-    max_evaluate: int = MAX_EVALUATE,
-    api_key: str | None = None,
+    max_fetch: int = MAX_FETCH,
     strategy: str = "all",
 ) -> list[dict]:
     """Crawl the follow networks of existing members to discover candidates.
+
+    Fetches profiles and recent posts for discovered accounts, saving them
+    to candidates.json for later review via /review-candidates.
 
     Args:
         client: Authenticated BskyClient.
         members: Current members dict keyed by DID.
         candidates: Current candidates dict keyed by DID.
-        frequency_threshold: Minimum number of members following an account to evaluate it.
-        max_evaluate: Maximum candidates to AI-evaluate in this run.
-        api_key: Anthropic API key (or uses env var).
+        frequency_threshold: Minimum number of members following an account to save it.
+        max_fetch: Maximum candidates to fetch profiles for in this run.
         strategy: Crawl strategy — "all" (default), "institutions" (only institutional
             entity types), or "weighted" (all members, but institutional follows count 2x).
 
@@ -62,7 +62,7 @@ def crawl_network(
         if not crawl_members:
             console.print(
                 "[yellow]No institutional members found. "
-                "Run 'bsky-geo classify' first.[/yellow]"
+                "Run /classify first.[/yellow]"
             )
             return []
     else:
@@ -128,66 +128,60 @@ def crawl_network(
     if not frequent:
         return []
 
-    # Evaluate top candidates
-    to_evaluate = frequent[:max_evaluate]
+    # Fetch profiles for top candidates
+    to_fetch = frequent[:max_fetch]
     new_candidates = []
 
-    console.print(f"[bold]Evaluating top {len(to_evaluate)} candidates...[/bold]\n")
+    console.print(f"[bold]Fetching profiles for top {len(to_fetch)} candidates...[/bold]\n")
 
-    for i, (did, count) in enumerate(to_evaluate, 1):
+    for i, (did, count) in enumerate(to_fetch, 1):
         try:
             profile = client.get_profile(did)
             handle = profile.get("handle", did)
             console.print(
-                f"  [{i}/{len(to_evaluate)}] {handle} "
-                f"(followed by {count} members)..."
+                f"  [{i}/{len(to_fetch)}] {handle} "
+                f"(followed by {count} members)"
             )
 
-            posts = client.get_author_posts(did, limit=50)
-            evaluation = evaluate_account(profile, posts, api_key=api_key)
+            posts = client.get_author_posts(did, limit=20)
 
             candidate = {
                 "handle": handle,
                 "display_name": profile.get("display_name", ""),
                 "bio": profile.get("description", ""),
-                "categories": evaluation.get("categories", []),
-                "entity_type": evaluation.get("entity_type", ""),
-                "institution": evaluation.get("institution_affiliation", ""),
-                "confidence": evaluation.get("confidence", 0.0),
-                "is_relevant": evaluation.get("is_relevant", False),
-                "reasoning": evaluation.get("reasoning", ""),
-                "activity_assessment": evaluation.get("activity_assessment", ""),
+                "categories": [],
+                "entity_type": "",
+                "institution": "",
+                "confidence": 0.0,
                 "source": "network_crawl",
                 "status": "pending",
                 "member_follow_count": count,
+                "recent_posts": posts[:20],
                 "discovered_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             }
 
             candidates[did] = candidate
             new_candidates.append(candidate)
 
-            relevance = "[green]relevant[/green]" if candidate["is_relevant"] else "[red]not relevant[/red]"
-            console.print(
-                f"    → {relevance} "
-                f"(confidence: {candidate['confidence']:.0%}, "
-                f"{', '.join(candidate['categories'][:3])})"
-            )
+            bio_preview = (profile.get("description", "") or "")[:80]
+            if bio_preview:
+                console.print(f"    {bio_preview}")
 
             # Brief pause between API calls
-            time.sleep(0.5)
+            time.sleep(0.3)
 
         except Exception as exc:
-            console.print(f"    [yellow]Error evaluating {did}: {exc}[/yellow]")
+            console.print(f"    [yellow]Error fetching {did}: {exc}[/yellow]")
             time.sleep(1)
 
     # Save updated candidates
     data_store.save_candidates(candidates)
 
-    relevant = sum(1 for c in new_candidates if c.get("is_relevant"))
     console.print(
-        f"\n[bold]Crawl complete:[/bold] {len(new_candidates)} evaluated, "
-        f"{relevant} relevant, "
-        f"{len(new_candidates) - relevant} not relevant"
+        f"\n[bold]Crawl complete:[/bold] {len(new_candidates)} candidates saved"
+    )
+    console.print(
+        "[dim]Run /review-candidates to evaluate and approve/reject them.[/dim]"
     )
 
     return new_candidates
