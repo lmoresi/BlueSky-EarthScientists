@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -326,6 +327,98 @@ def add(handle_or_did: str, follow: bool):
             console.print(f"  [yellow]Follow failed: {exc}[/yellow]")
 
     console.print(f"[green]Added {handle} to list.[/green]")
+
+
+# ── bulk-add ───────────────────────────────────────────────────────────────
+
+@cli.command("bulk-add")
+@click.option("--delay", default=1.0, help="Seconds between API calls (default: 1.0).")
+@click.option("--dry-run", is_flag=True, help="Show what would be added without doing it.")
+def bulk_add(delay: float, dry_run: bool):
+    """Add all approved candidates to the list in bulk."""
+    candidates = data_store.load_candidates()
+    members = data_store.load_members()
+
+    approved = {
+        did: info for did, info in candidates.items()
+        if info.get("status") == "approved" and did not in members
+    }
+
+    # Also skip any already-on-list (removed then re-approved)
+    approved = {
+        did: info for did, info in approved.items()
+        if not (did in members and not members[did].get("removed"))
+    }
+
+    if not approved:
+        console.print("[green]No approved candidates to add.[/green]")
+        return
+
+    console.print(
+        f"[bold]Bulk-adding {len(approved)} approved candidates to list[/bold]"
+    )
+
+    if dry_run:
+        for did, info in approved.items():
+            console.print(f"  [dim]Would add:[/dim] {info.get('handle', did)}")
+        console.print(f"\n[yellow]Dry run — no changes made.[/yellow]")
+        return
+
+    client = _get_client()
+    list_uri = _get_list_uri()
+    data_store.backup("members.json")
+
+    added = 0
+    errors = 0
+
+    for i, (did, info) in enumerate(approved.items(), 1):
+        handle = info.get("handle", did)
+        try:
+            listitem_uri = client.add_to_list(list_uri, did)
+
+            members[did] = {
+                "handle": handle,
+                "display_name": info.get("display_name", ""),
+                "bio": info.get("bio", ""),
+                "categories": info.get("categories", []),
+                "entity_type": info.get("entity_type", ""),
+                "institution": info.get("institution", ""),
+                "added_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                "source": info.get("source", "candidate"),
+                "confidence": info.get("confidence", 0.0),
+                "listitem_uri": listitem_uri,
+                "notes": "",
+            }
+
+            # Also follow
+            try:
+                client.follow(did)
+            except Exception:
+                pass  # Already following or follow failed — not critical
+
+            candidates[did]["status"] = "added"
+            added += 1
+            console.print(f"  [{i}/{len(approved)}] [green]+[/green] {handle}")
+
+            # Save periodically (every 25) so progress isn't lost on crash
+            if added % 25 == 0:
+                data_store.save_members(members)
+                data_store.save_candidates(candidates)
+
+        except Exception as exc:
+            errors += 1
+            console.print(f"  [{i}/{len(approved)}] [red]Error: {handle} — {exc}[/red]")
+
+        time.sleep(delay)
+
+    # Final save
+    data_store.save_members(members)
+    data_store.save_candidates(candidates)
+
+    console.print(f"\n[bold]Bulk add complete:[/bold]")
+    console.print(f"  [green]{added} added to list[/green]")
+    if errors:
+        console.print(f"  [red]{errors} errors[/red]")
 
 
 # ── remove ──────────────────────────────────────────────────────────────────

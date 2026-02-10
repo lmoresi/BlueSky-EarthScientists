@@ -107,17 +107,21 @@ geodynamics, seismology, volcanology, petrology, mineralogy, geochemistry, paleo
 
 ## Relevance Criteria
 
+**Key principle:** The list feeds a community feed. What matters is whether an account's posts surface expert earth science content — not the person's job title. Journalists, communicators, and policy experts who regularly post substantive earth science content belong on the list just as much as researchers do.
+
 **Belongs on the list:**
 - Researchers actively working in earth, environmental, ocean, atmospheric, or planetary sciences
 - Geoscience departments, geological surveys, environmental agencies, research institutes
 - Relevant academic societies, journals, science publishers
-- Science communicators with genuine expertise in these fields
+- Science communicators, journalists, and commentators who regularly post expert earth science content
 - Earthquake/volcano/weather monitoring services and natural hazard agencies
+- Climate/environment news outlets that publish substantive scientific content
 
 **Does NOT belong:**
-- Casual science enthusiasts with no professional connection
+- Casual science enthusiasts with no professional connection and no expert content
 - Accounts that rarely post about earth/environmental science
 - Pure policy/advocacy with no scientific content
+- Activists and public figures whose posts are primarily political, not scientific
 - Rock music, rock climbing, crystal healing, mining industry, landscape photography without science
 
 ## Reading and Writing Data
