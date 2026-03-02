@@ -274,6 +274,175 @@ def sync_follows():
     console.print(f"  {len(already)} already synced")
 
 
+# ── sync-list ──────────────────────────────────────────────────────────────
+
+@cli.command("sync-list")
+@click.argument("actor", required=False)
+@click.argument("list_name", required=False)
+@click.option("--dry-run", is_flag=True, help="Show what would be added without making changes.")
+@click.option("--follow/--no-follow", default=True, help="Also follow new members (default: yes).")
+def sync_list(actor: str | None, list_name: str | None, dry_run: bool, follow: bool):
+    """Sync members from an external Bluesky list into the managed list.
+
+    If ACTOR and LIST_NAME are given, sync that specific list (one-off mode).
+    If no arguments, sync all lists configured in config.json under sync_lists.
+    """
+    config = data_store.load_config()
+    list_uri = config.get("list_uri", "")
+    if not list_uri:
+        console.print("[red]No list configured.[/red] Run [bold]bsky-geo init[/bold] first.")
+        sys.exit(1)
+
+    # Build list of sources to sync
+    if actor and list_name:
+        sources = [{"actor": actor, "list_name": list_name, "list_uri": ""}]
+    else:
+        sources = config.get("sync_lists", [])
+        if not sources:
+            console.print(
+                "[yellow]No sync_lists configured in config.json and no arguments given.[/yellow]\n"
+                "Usage: bsky-geo sync-list <actor> <list_name>\n"
+                "Or add a sync_lists array to config.json."
+            )
+            return
+
+    client = _get_client()
+    members = data_store.load_members()
+    managed_dids = {
+        did for did, info in members.items() if not info.get("removed")
+    }
+
+    if not dry_run:
+        data_store.backup("members.json")
+
+    total_added = 0
+    total_skipped = 0
+    total_errors = 0
+
+    for source in sources:
+        src_actor = source["actor"]
+        src_name = source["list_name"]
+        src_uri = source.get("list_uri", "")
+
+        console.print(f"\n[bold]Syncing from @{src_actor} / \"{src_name}\"[/bold]")
+
+        # Resolve the source list URI
+        if not src_uri:
+            console.print(f"  Fetching lists for @{src_actor}...")
+            try:
+                actor_lists = client.get_lists(src_actor)
+            except Exception as exc:
+                console.print(f"  [red]Error fetching lists: {exc}[/red]")
+                total_errors += 1
+                continue
+
+            matched = [
+                lst for lst in actor_lists
+                if lst["name"].lower() == src_name.lower()
+            ]
+            if not matched:
+                available = ", ".join(lst["name"] for lst in actor_lists)
+                console.print(
+                    f"  [red]List \"{src_name}\" not found.[/red] "
+                    f"Available: {available or '(none)'}"
+                )
+                total_errors += 1
+                continue
+            src_uri = matched[0]["uri"]
+
+        # Fetch source list members
+        console.print(f"  Fetching list members...")
+        try:
+            source_members = client.get_list_members(src_uri)
+        except Exception as exc:
+            console.print(f"  [red]Error fetching list members: {exc}[/red]")
+            total_errors += 1
+            continue
+
+        source_dids = {m["did"] for m in source_members}
+        source_map = {m["did"]: m for m in source_members}
+        to_add = source_dids - managed_dids
+        already = source_dids & managed_dids
+
+        console.print(f"  {len(source_members)} members on source list")
+        console.print(f"  {len(already)} already on managed list")
+        console.print(f"  {len(to_add)} new members to add")
+
+        if not to_add:
+            continue
+
+        if dry_run:
+            for did in to_add:
+                info = source_map[did]
+                console.print(
+                    f"  [dim]Would add:[/dim] {info.get('handle', did)} "
+                    f"({info.get('display_name', '')})"
+                )
+            total_skipped += len(to_add)
+            continue
+
+        # Add new members
+        added = 0
+        errors = 0
+        for did in to_add:
+            info = source_map[did]
+            handle = info.get("handle", did)
+            try:
+                listitem_uri = client.add_to_list(list_uri, did)
+
+                # Fetch full profile for bio
+                try:
+                    profile = client.get_profile(did)
+                    bio = profile.get("description", "")
+                    display_name = profile.get("display_name", "")
+                except Exception:
+                    bio = None
+                    display_name = info.get("display_name", "")
+
+                members[did] = {
+                    "handle": handle,
+                    "display_name": display_name,
+                    "bio": bio,
+                    "categories": [],
+                    "entity_type": "",
+                    "institution": "",
+                    "added_date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                    "source": "list_sync",
+                    "confidence": 1.0,
+                    "listitem_uri": listitem_uri,
+                    "notes": f"Synced from @{src_actor} / \"{src_name}\"",
+                }
+                managed_dids.add(did)
+                added += 1
+                console.print(f"  [green]+[/green] {handle}")
+
+                if follow:
+                    try:
+                        client.follow(did)
+                    except Exception:
+                        pass
+
+                # Save periodically
+                if added % 10 == 0:
+                    data_store.save_members(members)
+
+            except Exception as exc:
+                errors += 1
+                console.print(f"  [red]Error adding {handle}: {exc}[/red]")
+
+        data_store.save_members(members)
+        total_added += added
+        total_errors += errors
+
+    # Summary
+    console.print(f"\n[bold]Sync-list complete:[/bold]")
+    console.print(f"  [green]{total_added} added to list[/green]")
+    if total_skipped:
+        console.print(f"  [yellow]{total_skipped} would be added (dry run)[/yellow]")
+    if total_errors:
+        console.print(f"  [red]{total_errors} errors[/red]")
+
+
 # ── add ─────────────────────────────────────────────────────────────────────
 
 @cli.command()

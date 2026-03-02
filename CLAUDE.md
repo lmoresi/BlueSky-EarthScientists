@@ -41,6 +41,7 @@ Run from `bsky-list-manager/` via `cd bsky-list-manager && pixi run bsky-geo <co
 ```
 bsky-geo refresh-profiles [--all]   Batch-fetch fresh bios from Bluesky (fast, no AI)
 bsky-geo sync-follows               Sync follows to list (bidirectional)
+bsky-geo sync-list [actor] [name]   Sync from an external list (--dry-run)
 bsky-geo add <handle>               Add someone to the list
 bsky-geo remove <handle>            Remove someone from the list
 bsky-geo list [--stats]             Show members (or summary stats)
